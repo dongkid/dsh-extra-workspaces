@@ -1,0 +1,8 @@
+# dsh-extra-workspaces bundle patch
+#
+# The row mounts the package host half (a plain Cordis plugin) and, through the
+# package dsh.client declaration, makes the web app load ./client as the browser
+# half that registers a custom control into the session-settings page.
+- insert:
+    - id: extra-workspaces
+      name: dsh-extra-workspaces
