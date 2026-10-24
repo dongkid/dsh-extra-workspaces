@@ -125,6 +125,8 @@ test('makes no existence claim, and marks the entry that contains the session wo
   assert.equal((text.match(/本会话主工作区在其中/g) ?? []).length, 1)
   // The blanket sentence must carry the same exception as the entry marker.
   assert.match(text, /仍然照常可写/)
+  // Relative paths follow the mutable current directory, not header.cwd.
+  assert.match(text, /当前工作目录解析/)
 })
 
 test('claims writability only in the mode that grants it', () => {
@@ -147,6 +149,7 @@ test('keeps the plain wording when no entry contains the session workspace', () 
   })
   assert.match(text, /除主工作区外/)
   assert.match(text, /不在主工作区之内/)
+  assert.match(text, /当前工作目录解析/)
 })
 
 test('drops duplicates, overlaps and junk, and defaults the alias', () => {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-extra-workspaces",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Per-session extra working directories for DSH: an option inside the session-settings page plus a runtime-context reminder that tells the model which extra directories this session may use.",
   "type": "module",
   "license": "MIT",
