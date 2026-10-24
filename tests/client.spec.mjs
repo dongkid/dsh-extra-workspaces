@@ -174,12 +174,15 @@ function createHarness(options = {}) {
     get(name) { return provided[name] },
     provide() { throw new Error('this plugin must not provide a service') },
   }
+  const requires = []
   const mod = captured.factory((id) => {
+    requires.push(id)
     if (id === 'react') return ReactStub
+    if (options.reactDom !== undefined && id === 'react-dom') return options.reactDom
     throw new Error('unexpected require: ' + id)
   })
   mod.apply(ctx)
-  return { registrations, effects, provided, ui, mod, localeListeners, setLocale(next) { activeLocale = next } }
+  return { registrations, effects, provided, ui, mod, localeListeners, requires, setLocale(next) { activeLocale = next } }
 }
 
 function makeProps(overrides = {}) {
@@ -410,4 +413,367 @@ test('the copy follows the host language and re-localizes on a switch', () => {
   page = renderControl(harness, props)
   assert.ok(page.field('Alias') !== undefined, page.text)
   assert.ok(page.buttonWithText('Add workspace') !== undefined, page.text)
+})
+
+/* ------------------------------------------------ in-app picker fallback */
+
+function browseListing(overrides = {}) {
+  return Object.assign({
+    path: '/home/u',
+    home: '/home/u',
+    crumbs: [
+      { name: '/', path: '/', hidden: false },
+      { name: 'home', path: '/home', hidden: false },
+      { name: 'u', path: '/home/u', hidden: false },
+    ],
+    entries: [
+      { name: '.cache', path: '/home/u/.cache', hidden: true },
+      { name: 'projects', path: '/home/u/projects', hidden: false },
+    ],
+    truncated: false,
+  }, overrides)
+}
+
+test('a refused native chooser falls back to the in-app picker over the Host home', async () => {
+  const calls = []
+  const harness = createHarness({
+    ui: {
+      pickDirectory: async () => {
+        throw new Error('directory picker failed: directoryPicker.pick needs the native capability; the composed picker serves "browse"')
+      },
+      listDirectory: async (path) => {
+        calls.push(path)
+        if (path === undefined) return browseListing()
+        return browseListing({
+          path,
+          crumbs: browseListing().crumbs.concat([{ name: 'projects', path, hidden: false }]),
+          entries: [{ name: 'web', path: '/home/u/projects/web', hidden: false }],
+        })
+      },
+    },
+  })
+  const { props, writes } = makeProps()
+  let page = renderControl(harness, props)
+  page.buttonWithText('添加工作区').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  assert.ok(page.text.includes('选择目录'), page.text)
+  await flush()
+  page = renderControl(harness, props)
+  assert.ok(page.text.includes('projects'), page.text)
+  assert.ok(!page.text.includes('.cache'), 'hidden entries stay hidden')
+  assert.deepEqual(calls, [undefined], 'the picker starts at the Host home')
+  page.buttonWithText('projects').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  assert.deepEqual(calls, [undefined, '/home/u/projects'])
+  assert.ok(page.text.includes('web'), page.text)
+  page.buttonWithText('选择当前目录').props.onClick()
+  assert.equal(writes.length, 1)
+  assert.deepEqual(writes[0], [{ path: '/home/u/projects', alias: 'projects', note: '' }])
+})
+
+test('the in-app picker toggles hidden entries and surfaces the listing bound', async () => {
+  const harness = createHarness({
+    ui: {
+      listDirectory: async () => browseListing({ truncated: true }),
+    },
+  })
+  const { props } = makeProps()
+  let page = renderControl(harness, props)
+  page.buttonWithText('添加工作区').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  await flush()
+  page = renderControl(harness, props)
+  assert.ok(page.text.includes('projects'), page.text)
+  assert.ok(!page.text.includes('.cache'), 'hidden entries stay hidden until asked for')
+  assert.ok(page.text.includes('文件夹过多'), 'the Host listing bound is reported')
+  const scrollArea = page.nodes.find((node) => node.props['data-dsh-scroll'] === 'true')
+  assert.ok(scrollArea !== undefined, 'the listing renders inside a scroll container')
+  assert.ok(!walk(scrollArea, { nodes: [], texts: [] }).texts.join('').includes('文件夹过多'),
+    'the bound notice stays pinned outside the scroll area')
+  page.buttonWithText('显示隐藏文件').props.onClick()
+  page = renderControl(harness, props)
+  assert.ok(page.text.includes('.cache'), 'the toggle reveals hidden entries')
+})
+
+test('when neither chooser answers the control reports it instead of leaving a dead dialog', async () => {
+  const harness = createHarness({
+    ui: {
+      pickDirectory: async () => {
+        throw new Error('directory picker failed: directoryPicker.pick needs the native capability; the composed picker serves "browse"')
+      },
+      listDirectory: async () => {
+        throw { rpcError: { code: 'directory-picker/unavailable', message: 'no browse capability', details: { capability: 'native' } } }
+      },
+    },
+  })
+  const { props, writes } = makeProps()
+  let page = renderControl(harness, props)
+  page.buttonWithText('添加工作区').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  await flush()
+  page = renderControl(harness, props)
+  assert.equal(writes.length, 0)
+  assert.ok(!page.text.includes('选择目录'), 'the dead dialog is gone: ' + page.text)
+  assert.ok(page.text.includes('现在打不开目录选择器'), page.text)
+})
+
+/* -------------------------------------------- in-app picker ergonomics */
+
+const ROOT_CRUMBS = [
+  { name: '/', path: '/', hidden: false },
+  { name: 'home', path: '/home', hidden: false },
+  { name: 'u', path: '/home/u', hidden: false },
+]
+
+test('the in-app picker steps up one level from the Host ancestry', async () => {
+  const calls = []
+  const harness = createHarness({
+    ui: {
+      listDirectory: async (path) => {
+        calls.push(path)
+        if (path === '/home/u/projects') {
+          return {
+            path,
+            home: '/home/u',
+            crumbs: ROOT_CRUMBS.concat([{ name: 'projects', path, hidden: false }]),
+            entries: [],
+            truncated: false,
+          }
+        }
+        return {
+          path: '/home/u',
+          home: '/home/u',
+          crumbs: ROOT_CRUMBS,
+          entries: [{ name: 'projects', path: '/home/u/projects', hidden: false }],
+          truncated: false,
+        }
+      },
+    },
+  })
+  const { props } = makeProps()
+  let page = renderControl(harness, props)
+  page.buttonWithText('添加工作区').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  await flush()
+  page = renderControl(harness, props)
+  page.buttonWithText('projects').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  assert.equal(calls[calls.length - 1], '/home/u/projects')
+  page.buttonWithText('../').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  assert.equal(calls[calls.length - 1], '/home/u', 'the parent level is listed again')
+  assert.ok(page.text.includes('projects'), page.text)
+})
+
+test('the picker shows the Windows roots the Host can serve beside the path', async () => {
+  const SEP = String.fromCharCode(92)
+  const calls = []
+  const home = {
+    path: 'C:' + SEP + 'Users' + SEP + 'u',
+    home: 'C:' + SEP + 'Users' + SEP + 'u',
+    crumbs: [
+      { name: 'C:' + SEP, path: 'C:' + SEP, hidden: false },
+      { name: 'Users', path: 'C:' + SEP + 'Users', hidden: false },
+      { name: 'u', path: 'C:' + SEP + 'Users' + SEP + 'u', hidden: false },
+    ],
+    entries: [],
+    truncated: false,
+  }
+  const harness = createHarness({
+    ui: {
+      listDirectory: async (path) => {
+        calls.push(path)
+        if (path === undefined) return home
+        const driveRoot = typeof path === 'string' && path.length === 3
+          && path.charAt(1) === ':' && path.charAt(2) === SEP
+        if (driveRoot) {
+          const letter = path.charAt(0)
+          if (letter === 'C' || letter === 'D') {
+            return { path, home: path, crumbs: [{ name: path, path, hidden: false }], entries: [], truncated: false }
+          }
+          throw { rpcError: { code: 'directory-picker/unreadable', message: 'no such drive', details: {} } }
+        }
+        return home
+      },
+    },
+  })
+  const { props } = makeProps()
+  let page = renderControl(harness, props)
+  page.buttonWithText('添加工作区').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  await flush()
+  page = renderControl(harness, props)
+  await flush()
+  page = renderControl(harness, props)
+  assert.ok(page.buttonWithText('C:') !== undefined, page.text)
+  assert.ok(page.buttonWithText('D:') !== undefined, page.text)
+  assert.ok(page.buttonWithText('E:') === undefined, page.text)
+  page.buttonWithText('D:').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  assert.equal(calls[calls.length - 1], 'D:' + SEP)
+  assert.ok(page.text.includes('D:'), page.text)
+})
+
+test('the in-app picker resumes the directory it last landed on', async () => {
+  const LAST_DIR_KEY = 'dsh-extra-workspaces:last-browse-dir'
+  const store = {}
+  const previous = globalThis.window.localStorage
+  globalThis.window.localStorage = {
+    getItem: (key) => (Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null),
+    setItem: (key, value) => { store[key] = String(value) },
+  }
+  try {
+    store[LAST_DIR_KEY] = 'D:\\work'
+    const calls = []
+    const harness = createHarness({
+      ui: {
+        listDirectory: async (path) => {
+          calls.push(path)
+          if (path === 'D:\\work') {
+            return {
+              path: 'D:\\work',
+              home: 'D:\\',
+              crumbs: [
+                { name: 'D:\\', path: 'D:\\', hidden: false },
+                { name: 'work', path: 'D:\\work', hidden: false },
+              ],
+              entries: [],
+              truncated: false,
+            }
+          }
+          return { path: '/home/u', home: '/home/u', crumbs: ROOT_CRUMBS, entries: [], truncated: false }
+        },
+      },
+    })
+    const { props } = makeProps()
+    let page = renderControl(harness, props)
+    page.buttonWithText('添加工作区').props.onClick()
+    await flush()
+    page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    assert.equal(calls[0], 'D:\\work', 'the remembered directory opens first: ' + JSON.stringify(calls))
+    page.buttonWithText('选择当前目录').props.onClick()
+    assert.equal(store[LAST_DIR_KEY], 'D:\\work')
+  } finally {
+    if (previous === undefined) delete globalThis.window.localStorage
+    else globalThis.window.localStorage = previous
+  }
+})
+
+test('the dialog portals to document.body when react-dom is available', async () => {
+  const previousDocument = globalThis.document
+  globalThis.document = { body: {} }
+  const portalCalls = []
+  try {
+    const harness = createHarness({
+      ui: { listDirectory: async () => browseListing() },
+      reactDom: {
+        createPortal: (node, container) => {
+          portalCalls.push(container)
+          return node
+        },
+      },
+    })
+    const { props } = makeProps()
+    let page = renderControl(harness, props)
+    page.buttonWithText('添加工作区').props.onClick()
+    await flush()
+    page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    assert.ok(harness.requires.includes('react-dom'), 'react-dom is requested: ' + JSON.stringify(harness.requires))
+    assert.ok(portalCalls.length > 0, 'the dialog is portaled')
+    assert.equal(portalCalls[0], globalThis.document.body)
+    assert.ok(page.text.includes('选择目录'), page.text)
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document
+    else globalThis.document = previousDocument
+  }
+})
+
+test('the new-folder form stays pinned outside the scrolling list and autofocuses', async () => {
+  const entries = []
+  for (let i = 0; i < 30; i += 1) {
+    entries.push({ name: 'dir' + i, path: '/home/u/dir' + i, hidden: false })
+  }
+  const harness = createHarness({
+    ui: { listDirectory: async () => browseListing({ entries }) },
+  })
+  const { props } = makeProps()
+  let page = renderControl(harness, props)
+  page.buttonWithText('添加工作区').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  await flush()
+  page = renderControl(harness, props)
+  page.buttonWithText('新建文件夹').props.onClick()
+  page = renderControl(harness, props)
+  const field = page.field('文件夹名称')
+  assert.ok(field !== undefined, 'the folder-name input renders')
+  assert.equal(field.props.autoFocus, true, 'the input takes focus when it opens')
+  const scrollArea = page.nodes.find((node) => node.props['data-dsh-scroll'] === 'true')
+  assert.ok(scrollArea !== undefined, 'the scrolling list exists')
+  assert.ok(
+    !walk(scrollArea, { nodes: [], texts: [] }).nodes.some((node) => node.props['data-dsh-create'] === 'true'),
+    'the form is pinned outside the scroll area',
+  )
+  const panel = page.nodes.find((node) => node.props['data-dsh-create'] === 'true')
+  assert.ok(panel !== undefined, 'the pinned form panel exists')
+})
+
+/* ------------------------------------------------- responsiveness */
+
+test('responsive styles are injected once into the page head', () => {
+  const previousDocument = globalThis.document
+  const appended = []
+  globalThis.document = {
+    head: { appendChild(node) { appended.push(node) } },
+    body: {},
+    getElementById(id) {
+      return appended.find((node) => node.id === id) ?? null
+    },
+    createElement() {
+      return { id: '', textContent: '' }
+    },
+  }
+  try {
+    createHarness()
+    createHarness()
+    const sheets = appended.filter((node) => node.id === 'dsh-extra-workspaces-responsive')
+    assert.equal(sheets.length, 1, 'a single sheet per page')
+    const css = sheets[0].textContent
+    assert.ok(css.includes('@media (max-width: 640px)'), 'the phone media query is present')
+    assert.ok(css.includes('--ew-dialog-w'), 'dialog geometry is variable-driven')
+    assert.ok(css.includes('--ew-row-min'), 'touch row height is variable-driven')
+    assert.ok(css.includes('env(safe-area-inset-bottom'), 'safe-area padding is present')
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document
+    else globalThis.document = previousDocument
+  }
+})
+
+test('the control and dialog carry the responsive class hooks', async () => {
+  const harness = createHarness({ ui: { listDirectory: async () => browseListing() } })
+  const { props } = makeProps()
+  let page = renderControl(harness, props)
+  const control = page.nodes.find((node) => node.props.className === 'dsh-ew-control')
+  assert.ok(control !== undefined, 'the settings control exposes its class')
+  page.buttonWithText('添加工作区').props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  await flush()
+  page = renderControl(harness, props)
+  const overlay = page.nodes.find((node) => node.props.className === 'dsh-ew-overlay')
+  assert.ok(overlay !== undefined, 'the overlay carries its class')
+  assert.ok(page.text.includes('选择目录'), page.text)
 })
