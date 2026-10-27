@@ -153,6 +153,8 @@ function createHarness(options = {}) {
     ? { pickDirectory: async () => '/w/alpha', listDirectory: async () => [] }
     : options.ui
   if (ui !== null && ui !== undefined) provided.uiWorkspace = ui
+  if (options.sessions !== undefined) provided.sessions = options.sessions
+  if (options.workspaces !== undefined) provided.workspaces = options.workspaces
   let activeLocale = options.locale === undefined ? 'zh-CN' : options.locale
   provided.locale = {
     getLocale: () => ({ active: activeLocale }),
@@ -776,4 +778,316 @@ test('the control and dialog carry the responsive class hooks', async () => {
   const overlay = page.nodes.find((node) => node.props.className === 'dsh-ew-overlay')
   assert.ok(overlay !== undefined, 'the overlay carries its class')
   assert.ok(page.text.includes('选择目录'), page.text)
+})
+
+/* ------------------------------------------------- quick add: sources */
+
+const HISTORY_KEY = 'dsh-extra-workspaces:history-v1'
+
+/** A client service face ({ list } snapshot source) with a settable value. */
+function makeService(initial) {
+  let value = initial
+  const source = {
+    getSnapshot: () => value,
+    subscribe: () => () => {},
+  }
+  return { list: source, set(next) { value = next } }
+}
+
+/** Install a localStorage stub for one test; returns the restore function. */
+function withStorage(store) {
+  const previous = globalThis.window.localStorage
+  globalThis.window.localStorage = {
+    getItem: (key) => (Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null),
+    setItem: (key, value) => { store[key] = String(value) },
+    removeItem: (key) => { delete store[key] },
+  }
+  return () => {
+    if (previous === undefined) delete globalThis.window.localStorage
+    else globalThis.window.localStorage = previous
+  }
+}
+
+function sessionService(cwd) {
+  return makeService({
+    phase: 'ready',
+    ids: ['s1'],
+    byId: { s1: { id: 's1', cwd, displayTitle: 's1', running: false, blank: false, updatedAt: 0 } },
+  })
+}
+
+test('a directory the user registered as a workspace is one click away', async () => {
+  const store = {}
+  const restore = withStorage(store)
+  try {
+    const harness = createHarness({
+      ui: { listDirectory: async () => browseListing() },
+      sessions: sessionService('/home/u/projects/web'),
+      workspaces: makeService({
+        phase: 'ready',
+        items: [
+          { workspaceId: 'w1', path: '/home/u/projects/web', title: 'Web', updatedAt: '2024-01-02T00:00:00Z' },
+          { workspaceId: 'w2', path: '/other/docs', title: 'Docs', updatedAt: '2024-01-01T00:00:00Z' },
+        ],
+      }),
+    })
+    const { props, writes } = makeProps()
+    let page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    assert.ok(page.text.includes('快速添加'), page.text)
+    assert.ok(page.text.includes('推荐'), page.text)
+    const chip = page.buttonWithText('Docs')
+    assert.ok(chip !== undefined, page.text)
+    chip.props.onClick()
+    assert.deepEqual(writes[0], [{ path: '/other/docs', alias: 'Docs', note: '' }])
+  } finally {
+    restore()
+  }
+})
+
+test('history remembers an added directory and offers it back after removal', async () => {
+  const store = {}
+  const restore = withStorage(store)
+  try {
+    const harness = createHarness()
+    const first = makeProps({ value: [{ path: '/w/alpha', alias: 'Alpha', note: '共享资料' }] })
+    renderControl(harness, first.props)
+    await flush()
+    const saved = JSON.parse(store[HISTORY_KEY])
+    assert.equal(saved.length, 1)
+    assert.deepEqual(saved[0], { path: '/w/alpha', alias: 'Alpha', note: '共享资料', updatedAt: saved[0].updatedAt, source: 'history' })
+    assert.equal(typeof saved[0].updatedAt, 'number')
+
+    // The entry is removed from the list; the browser can still put it back.
+    const second = makeProps()
+    let page = renderControl(harness, second.props)
+    await flush()
+    page = renderControl(harness, second.props)
+    const chip = page.buttonWithText('Alpha')
+    assert.ok(chip !== undefined, page.text)
+    chip.props.onClick()
+    assert.deepEqual(second.writes[0], [{ path: '/w/alpha', alias: 'Alpha', note: '共享资料' }])
+  } finally {
+    restore()
+  }
+})
+
+test('a history chip can be dropped without touching the list', async () => {
+  const store = {}
+  store[HISTORY_KEY] = JSON.stringify([
+    { path: '/w/beta', alias: 'Beta', note: '', updatedAt: 1, source: 'history' },
+  ])
+  const restore = withStorage(store)
+  try {
+    const harness = createHarness()
+    const { props, writes } = makeProps()
+    let page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    assert.ok(page.text.includes('最近使用'), page.text)
+    const forget = page.find('button', (p) => p['aria-label'] === '从历史里移除 Beta')[0]
+    assert.ok(forget !== undefined, page.text)
+    forget.props.onClick()
+    assert.equal(writes.length, 0, 'forgetting a shortcut is not a list write')
+    assert.deepEqual(JSON.parse(store[HISTORY_KEY]), [])
+    page = renderControl(harness, props)
+    assert.ok(page.buttonWithText('Beta') === undefined, page.text)
+  } finally {
+    restore()
+  }
+})
+
+test('a corrupted history store reads as empty instead of breaking the card', async () => {
+  const store = { [HISTORY_KEY]: '{not json' }
+  const restore = withStorage(store)
+  try {
+    const harness = createHarness()
+    const { props } = makeProps()
+    const page = renderControl(harness, props)
+    await flush()
+    assert.ok(page.text.includes('还没有额外工作区'))
+    assert.ok(page.find('button').length === 1, 'only the add button remains')
+  } finally {
+    restore()
+  }
+})
+
+test('candidates already in the list, or overlapping it, are never offered', async () => {
+  const store = {}
+  const restore = withStorage(store)
+  try {
+    const harness = createHarness({
+      workspaces: makeService({
+        phase: 'ready',
+        items: [
+          { workspaceId: 'w1', path: '/w/alpha', title: 'Alpha again', updatedAt: '2024-01-02T00:00:00Z' },
+          { workspaceId: 'w2', path: '/w/alpha/sub', title: 'Inside alpha', updatedAt: '2024-01-01T00:00:00Z' },
+        ],
+      }),
+    })
+    const { props } = makeProps({ value: [{ path: '/w/alpha', alias: 'Alpha', note: '' }] })
+    let page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    assert.ok(!page.text.includes('快速添加'), 'no offer means no strip: ' + page.text)
+  } finally {
+    restore()
+  }
+})
+
+test('a full list offers no quick-add and shows the count', async () => {
+  const store = {}
+  const restore = withStorage(store)
+  try {
+    const harness = createHarness({
+      workspaces: makeService({
+        phase: 'ready',
+        items: [{ workspaceId: 'w1', path: '/w/other', title: 'Other', updatedAt: '2024-01-02T00:00:00Z' }],
+      }),
+    })
+    const value = []
+    for (let i = 0; i < 8; i += 1) value.push({ path: '/w/' + i, alias: 'w' + i, note: '' })
+    const { props } = makeProps({ value })
+    let page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    assert.ok(!page.text.includes('快速添加'))
+    assert.ok(page.text.includes('8 / 8'), page.text)
+  } finally {
+    restore()
+  }
+})
+
+test('sibling folders beside the session workspace are offered, minus noise', async () => {
+  const store = {}
+  const restore = withStorage(store)
+  try {
+    const calls = []
+    const harness = createHarness({
+      ui: {
+        listDirectory: async (path) => {
+          calls.push(path)
+          return {
+            path,
+            home: '/home/u',
+            crumbs: [{ name: '/', path: '/', hidden: false }, { name: 'work', path: '/work', hidden: false }, { name: 'src', path: '/work/src', hidden: false }],
+            entries: [
+              { name: 'app', path: '/work/src/app', hidden: false },
+              { name: 'docs', path: '/work/src/docs', hidden: false },
+              { name: 'node_modules', path: '/work/src/node_modules', hidden: false },
+              { name: 'AppData', path: '/work/src/AppData', hidden: false },
+              { name: '.git', path: '/work/src/.git', hidden: true },
+            ],
+            truncated: false,
+          }
+        },
+      },
+      sessions: sessionService('/work/src/app'),
+    })
+    const { props } = makeProps()
+    let page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    assert.deepEqual(calls[0], '/work/src', 'one listing of the parent directory')
+    assert.ok(page.buttonWithText('docs') !== undefined, page.text)
+    assert.ok(page.buttonWithText('node_modules') === undefined, 'build noise is filtered')
+    assert.ok(page.buttonWithText('AppData') === undefined, 'system folders are filtered')
+    assert.ok(page.buttonWithText('.git') === undefined, 'hidden folders never surface')
+    assert.ok(page.buttonWithText('app') === undefined, 'the session workspace itself is not offered')
+  } finally {
+    restore()
+  }
+})
+
+test('a host without browse capability stays quiet; history still works', async () => {
+  const store = {}
+  store[HISTORY_KEY] = JSON.stringify([
+    { path: '/w/used', alias: 'Used', note: '', updatedAt: 2, source: 'history' },
+  ])
+  const restore = withStorage(store)
+  try {
+    const harness = createHarness({
+      ui: {
+        listDirectory: async () => {
+          throw { rpcError: { code: 'directory-picker/unavailable', details: { capability: 'native' } } }
+        },
+      },
+      sessions: sessionService('/deep/repo'),
+    })
+    const { props } = makeProps()
+    let page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    assert.ok(page.text.includes('最近使用'), page.text)
+    assert.ok(page.buttonWithText('Used') !== undefined, page.text)
+    assert.ok(!page.text.includes('现在打不开目录选择器'), 'no dead error: ' + page.text)
+  } finally {
+    restore()
+  }
+})
+
+/* --------------------------------------------- quick add inside the picker */
+
+test('the picker offers known places and refuses a directory already listed', async () => {
+  const store = {}
+  store[HISTORY_KEY] = JSON.stringify([
+    { path: '/w/used', alias: 'Used', note: '', updatedAt: 2, source: 'history' },
+  ])
+  const restore = withStorage(store)
+  try {
+    const calls = []
+    const harness = createHarness({
+      ui: {
+        listDirectory: async (path) => {
+          calls.push(path)
+          if (path === '/w/used') {
+            return { path, home: '/home/u', crumbs: [{ name: '/', path: '/', hidden: false }], entries: [], truncated: false }
+          }
+          return browseListing()
+        },
+      },
+    })
+    const { props } = makeProps({ value: [{ path: '/home/u', alias: 'Home', note: '' }] })
+    let page = renderControl(harness, props)
+    page.buttonWithText('添加工作区').props.onClick()
+    await flush()
+    page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    assert.ok(page.text.includes('常用位置'), page.text)
+    const place = page.find('button', (p) => p.title === '/w/used')[0]
+    assert.ok(place !== undefined, page.text)
+    assert.equal(page.buttonWithText('选择当前目录').props.disabled, true, 'an already listed directory cannot be picked')
+    assert.ok(page.text.includes('这个目录已经在列表里了'), page.text)
+    place.props.onClick()
+    await flush()
+    page = renderControl(harness, props)
+    assert.equal(calls[calls.length - 1], '/w/used', 'the place chip navigates')
+  } finally {
+    restore()
+  }
+})
+
+test('the picker explains a full list instead of failing after the click', async () => {
+  const store = {}
+  const restore = withStorage(store)
+  try {
+    const harness = createHarness({ ui: { listDirectory: async () => browseListing() } })
+    const value = []
+    for (let i = 0; i < 8; i += 1) value.push({ path: '/w/' + i, alias: 'w' + i, note: '' })
+    const { props, writes } = makeProps({ value })
+    let page = renderControl(harness, props)
+    page.buttonWithText('添加工作区').props.onClick()
+    await flush()
+    page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    const use = page.buttonWithText('选择当前目录')
+    assert.equal(use.props.disabled, true)
+    assert.ok(page.text.includes('最多只能添加 8 个额外工作区'), page.text)
+    assert.equal(writes.length, 0)
+  } finally {
+    restore()
+  }
 })
