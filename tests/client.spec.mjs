@@ -314,16 +314,36 @@ test('an unavailable picker shows a message instead of throwing', async () => {
   assert.ok(renderControl(harness, props).text.includes('现在打不开目录选择器'))
 })
 
-test('the list is capped at eight entries', async () => {
+test('the list is capped at eight entries and a full list disables adding', () => {
   const harness = createHarness({ ui: { pickDirectory: async () => '/w/new', listDirectory: async () => [] } })
   const value = []
   for (let i = 0; i < 8; i += 1) value.push({ path: '/w/' + i, alias: 'w' + i, note: '' })
   const { props, writes } = makeProps({ value })
   const page = renderControl(harness, props)
+  // The cap is known before the picker opens, so the button refuses at once
+  // instead of walking the user through a chooser that ends in "at most 8".
+  assert.equal(page.buttonWithText('添加工作区').props.disabled, true)
+  assert.ok(page.text.includes('8 / 8'), page.text)
+  assert.equal(writes.length, 0)
+})
+
+test('the configured cap from the registration item bounds the panel', async () => {
+  const harness = createHarness({ ui: { pickDirectory: async () => '/w/c', listDirectory: async () => [] } })
+  const item = { key: 'workspaces', type: 'stringList', title: '额外工作区', default: [], max: 3 }
+  const value = [
+    { path: '/w/a', alias: 'a', note: '' },
+    { path: '/w/b', alias: 'b', note: '' },
+  ]
+  const { props, writes } = makeProps({ value, item })
+  const page = renderControl(harness, props)
+  assert.ok(page.text.includes('2 / 3'), page.text)
   page.buttonWithText('添加工作区').props.onClick()
   await flush()
-  assert.equal(writes.length, 0)
-  assert.ok(renderControl(harness, props).text.includes('最多只能添加 8 个额外工作区'))
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].length, 3, JSON.stringify(writes[0]))
+  const full = renderControl(harness, makeProps({ value: writes[0], item }).props)
+  assert.equal(full.buttonWithText('添加工作区').props.disabled, true)
+  assert.ok(full.text.includes('3 / 3'), full.text)
 })
 
 test('removing an entry writes the remaining ones', () => {
@@ -350,6 +370,43 @@ test('a keystroke never writes; blur commits the alias edit', () => {
   rerendered.field(ALIAS).props.onBlur()
   assert.equal(writes.length, 1)
   assert.deepEqual(writes[0], [{ path: '/w/alpha', alias: 'Alpha2', note: 'a' }])
+})
+
+test('an IME-composing Enter never commits the alias', () => {
+  const harness = createHarness()
+  const value = [{ path: '/w/alpha', alias: 'Alpha', note: 'a' }]
+  const { props, writes } = makeProps({ value })
+  const page = renderControl(harness, props)
+  page.field(ALIAS).props.onChange({ target: { value: '阿尔' } })
+  const composing = { key: 'Enter', isComposing: true, preventDefault() { this.prevented = true } }
+  renderControl(harness, props).field(ALIAS).props.onKeyDown(composing)
+  assert.equal(composing.prevented, undefined, 'the composing Enter is left to the IME')
+  assert.equal(writes.length, 0, 'a half-typed alias is not written')
+  // A plain Enter still commits the draft.
+  const plain = { key: 'Enter', preventDefault() { this.prevented = true } }
+  renderControl(harness, props).field(ALIAS).props.onKeyDown(plain)
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0][0].alias, '阿尔')
+})
+
+test('a rejected write returns the row draft to the value the host kept', async () => {
+  const harness = createHarness()
+  const value = [{ path: '/w/alpha', alias: 'Alpha', note: '' }]
+  let attempts = 0
+  const { props } = makeProps({
+    value,
+    setValue: () => { attempts += 1; return Promise.reject(new Error('store down')) },
+  })
+  let page = renderControl(harness, props)
+  page.field(ALIAS).props.onChange({ target: { value: 'Alpha2' } })
+  page = renderControl(harness, props)
+  page.field(ALIAS).props.onBlur()
+  await flush()
+  // The failure tick re-renders the row, and the draft resets to the kept value.
+  page = renderControl(harness, props)
+  page = renderControl(harness, props)
+  assert.equal(page.field(ALIAS).props.value, 'Alpha')
+  assert.equal(attempts, 1)
 })
 
 test('a rejected setValue never escapes the render', async () => {
@@ -672,6 +729,34 @@ test('the in-app picker resumes the directory it last landed on', async () => {
   }
 })
 
+test('the picker remembers only a directory the user confirmed', async () => {
+  const LAST_DIR_KEY = 'dsh-extra-workspaces:last-browse-dir'
+  const store = {}
+  const previous = globalThis.window.localStorage
+  globalThis.window.localStorage = {
+    getItem: (key) => (Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null),
+    setItem: (key, value) => { store[key] = String(value) },
+  }
+  try {
+    const harness = createHarness({ ui: { listDirectory: async () => browseListing() } })
+    const { props } = makeProps()
+    let page = renderControl(harness, props)
+    page.buttonWithText('添加工作区').props.onClick()
+    await flush()
+    page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    // Browsing without choosing must not move the next open's starting point.
+    assert.equal(store[LAST_DIR_KEY], undefined)
+    page.buttonExact('取消').props.onClick()
+    page = renderControl(harness, props)
+    assert.equal(store[LAST_DIR_KEY], undefined)
+  } finally {
+    if (previous === undefined) delete globalThis.window.localStorage
+    else globalThis.window.localStorage = previous
+  }
+})
+
 test('the dialog portals to document.body when react-dom is available', async () => {
   const previousDocument = globalThis.document
   globalThis.document = { body: {} }
@@ -697,6 +782,75 @@ test('the dialog portals to document.body when react-dom is available', async ()
     assert.ok(portalCalls.length > 0, 'the dialog is portaled')
     assert.equal(portalCalls[0], globalThis.document.body)
     assert.ok(page.text.includes('选择目录'), page.text)
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document
+    else globalThis.document = previousDocument
+  }
+})
+
+test('a failed first listing offers a retry inside the dialog', async () => {
+  let calls = 0
+  const harness = createHarness({
+    ui: {
+      listDirectory: async () => {
+        calls += 1
+        if (calls === 1) throw new Error('transient failure')
+        return browseListing()
+      },
+    },
+  })
+  const { props } = makeProps()
+  let page = renderControl(harness, props)
+  page.buttonWithText('添加工作区').props.onClick()
+  for (let i = 0; i < 4; i += 1) {
+    await flush()
+    page = renderControl(harness, props)
+  }
+  assert.ok(page.text.includes('transient failure'), page.text)
+  const retry = page.buttonWithText('重试')
+  assert.ok(retry !== undefined, page.text)
+  retry.props.onClick()
+  await flush()
+  page = renderControl(harness, props)
+  assert.ok(page.buttonWithText('选择当前目录') !== undefined, page.text)
+})
+
+test('the dialog closes on a backdrop click and on a document-level Escape', async () => {
+  const previousDocument = globalThis.document
+  const listeners = []
+  globalThis.document = {
+    activeElement: null,
+    body: {},
+    head: null,
+    addEventListener(type, fn) { listeners.push({ type, fn }) },
+    removeEventListener() {},
+  }
+  try {
+    const harness = createHarness({ ui: { listDirectory: async () => browseListing() } })
+    const { props } = makeProps()
+    let page = renderControl(harness, props)
+    page.buttonWithText('添加工作区').props.onClick()
+    await flush()
+    page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    const overlay = page.nodes.find((node) => node.props.className === 'dsh-ew-overlay')
+    assert.ok(overlay !== undefined, page.text)
+    overlay.props.onMouseDown({ target: overlay, currentTarget: overlay, preventDefault() {} })
+    page = renderControl(harness, props)
+    assert.equal(page.nodes.filter((node) => node.props.className === 'dsh-ew-overlay').length, 0, 'backdrop click closes')
+
+    // Reopen; Escape falling on the page (focus on <body>) must still close it.
+    page.buttonWithText('添加工作区').props.onClick()
+    await flush()
+    page = renderControl(harness, props)
+    await flush()
+    page = renderControl(harness, props)
+    const keyListeners = listeners.filter((entry) => entry.type === 'keydown')
+    assert.ok(keyListeners.length > 0, 'the dialog listens for keys at the document')
+    for (const entry of keyListeners) entry.fn({ key: 'Escape', defaultPrevented: false, preventDefault() {} })
+    page = renderControl(harness, props)
+    assert.equal(page.nodes.filter((node) => node.props.className === 'dsh-ew-overlay').length, 0, 'document Escape closes')
   } finally {
     if (previousDocument === undefined) delete globalThis.document
     else globalThis.document = previousDocument
@@ -1069,25 +1223,13 @@ test('the picker offers known places and refuses a directory already listed', as
   }
 })
 
-test('the picker explains a full list instead of failing after the click', async () => {
-  const store = {}
-  const restore = withStorage(store)
-  try {
-    const harness = createHarness({ ui: { listDirectory: async () => browseListing() } })
-    const value = []
-    for (let i = 0; i < 8; i += 1) value.push({ path: '/w/' + i, alias: 'w' + i, note: '' })
-    const { props, writes } = makeProps({ value })
-    let page = renderControl(harness, props)
-    page.buttonWithText('添加工作区').props.onClick()
-    await flush()
-    page = renderControl(harness, props)
-    await flush()
-    page = renderControl(harness, props)
-    const use = page.buttonWithText('选择当前目录')
-    assert.equal(use.props.disabled, true)
-    assert.ok(page.text.includes('最多只能添加 8 个额外工作区'), page.text)
-    assert.equal(writes.length, 0)
-  } finally {
-    restore()
-  }
+test('a full list never opens the picker at all', async () => {
+  const harness = createHarness({ ui: { listDirectory: async () => browseListing() } })
+  const value = []
+  for (let i = 0; i < 8; i += 1) value.push({ path: '/w/' + i, alias: 'w' + i, note: '' })
+  const { props, writes } = makeProps({ value })
+  const page = renderControl(harness, props)
+  assert.equal(page.buttonWithText('添加工作区').props.disabled, true)
+  assert.equal(page.nodes.filter((node) => node.props.className === 'dsh-ew-overlay').length, 0)
+  assert.equal(writes.length, 0)
 })
