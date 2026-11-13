@@ -11,12 +11,12 @@
 
 | # | 依赖 | 用到的具体接口 | 插件内位置 | 失效时表现 |
 |---|---|---|---|---|
-| 1 | 会话设置基础设施（相邻插件 dsh-session-settings） | 宿主服务 `ctx.sessionSettings.register(registration)`、`ctx.sessionSettings.getItem(pluginId, itemKey, sessionId)`（同步返回） | `lib/index.js` apply / text 回调 | **硬失败**：服务缺席时插件不激活（`inject: ['sessionSettings']`），设置页不会出现本项 |
-| 2 | 同上，浏览器侧 | 客户端服务 `sessionSettings.registerRenderer(pluginId, itemKey, Component)` | `lib/client.js` apply | **降级**：注册失败只打日志，页面回落到内置控件（本插件依赖第 1 节"渲染器缺席保护"避免写坏数据） |
+| 1 | 会话设置基础设施（相邻插件 dsh-session-settings） | 宿主服务 `ctx.sessionSettings.register(registration)`、`ctx.sessionSettings.getItem(pluginId, itemKey, sessionId)`（同步返回）；注册项的 `item.max` 携带生效上限（协议 v1 `SerializedItem.max` 会序列化到浏览器） | `lib/index.js` apply / text 回调 | **硬失败（两侧都坏）**：宿主半服务缺席 → 本插件不激活、设置页没有本项；浏览器半 `inject: ['sessionSettings']` 是 required → 客户端条目停在 pending → 启动审计 `assertEntriesActive` 抛错 → `page.fail`，**整个 Web 客户端不挂载**（所有客户端插件一起不可用） |
+| 2 | 同上，浏览器侧 | 客户端服务 `sessionSettings.registerRenderer(pluginId, itemKey, Component)`；渲染器 props 按实现传入（见 §五 #9） | `lib/client.js` apply | **降级**：注册失败只打日志，页面回落到内置 `stringList` 控件；本插件的值是对象数组，内置控件判为不可表示 → 只读展示，不会写坏数据 |
 | 3 | 运行时上下文（dsh-system-prompt） | `ctx.inject(['systemPrompt'], scope => scope.systemPrompt.context({ name, order, text, interpolate: false }))`；`text` 是**每个 step 都会求值**的同步函数；`interpolate: false` 让用户备注里的 `{{...}}` 不被当作提示词变量 | `lib/index.js` | **降级**：服务缺席时静默不贡献，设置项照常工作，模型不再被通知 |
 | 4 | 上下文排序表 | `order` 用裸数字 **118**（介于官方 `SANDBOX_POLICY=110`、`APPROVAL_POLICY=115`、`SUBAGENT_DELEGATION=120` 之间；该表在 dsh-system-prompt 内，外部插件无法注册新名字） | `lib/index.js` `CONTEXT_ORDER` | **语义漂移**：数字仍合法不会报错，但与其他贡献的相对顺序可能变化 |
-| 5 | 会话对象 | `session.id`（取本会话的值）、`session.header.cwd`（判断某条目是否包含主工作区） | `lib/index.js` text 回调 | **硬失败/错话**：字段改名会让 text 抛错或措辞失真 |
-| 6 | 权限档（dsh-sandbox-policy，可选） | `ctx.get('sandboxPolicy').resolve({ session }).mode`，取值 `read-only` / `workspace-write` / `danger-full-access` | `lib/index.js` `permissionMode()` | **降级**：读不到时提醒里改用"取决于当前权限档"的中性措辞 |
+| 5 | 会话对象 | `session.id`（取本会话的值）、`session.header.cwd`（策略服务缺席时作为工作区位置的回退） | `lib/index.js` text 回调 | **硬失败/错话**：字段改名会让 text 抛错或措辞失真 |
+| 6 | 权限档（dsh-sandbox-policy，可选） | `ctx.get('sandboxPolicy').resolve({ session })` 的 `mode`（`read-only` / `workspace-write` / `danger-full-access`）与 `workspaceRoot`；后者和 `/tmp`、`os.tmpdir()` 一起决定哪些条目在 workspace-write 下可写 | `lib/index.js` `sandboxFacts()` / `writableRootsOf()` | **降级**：读不到时提醒里改用"取决于当前权限档"的中性措辞，且只按 `session.header.cwd` 做位置判断 |
 | 7 | 权限语义（dsh-sandbox） | 事实前提：`workspace-write` 的可写根 = 会话 cwd + `/tmp` + `os.tmpdir()`；**读取不受限制**；`read-only` 无可写根 | `lib/rules.js` `CAPABILITY` 文案 | **说假话**：如果 DSH 改了可写根语义，提醒会与 `sandbox:policy` 段矛盾 |
 | 8 | 客户端模块系统（dsh-client-modules） | `window.__ModuleLoader__.load({ id, factory })`；`factory(require)` 只允许平台模块表（本插件用 `react`；弹窗置顶层用 `react-dom` 的 `createPortal`，属平台内置，无需 `dsh.client.external`） | `lib/client.js` 文件头、`portalize()` 与尾部 | **硬失败**：模块装载不上，页面看不到本控件（其它插件不受影响）；`react-dom` 缺失时弹窗退回内联渲染（可能被设置卡片遮挡） |
 | 9 | 插件清单声明 | `dsh.manifestVersion`、`dsh.bundle.patch`、`dsh.client.platform='web'`、`dsh.client.inject`、`exports['./client']` | `package.json` | **硬失败**：声明不合法会让**整张客户端模块表**装载失败（同一个宿主进程里的所有客户端插件一起消失） |
@@ -26,7 +26,7 @@
 | 13 | 页面样式注入（浏览器 DOM） | `document.head.appendChild(<style id="dsh-extra-workspaces-responsive">)`（已存在时就地更新）；CSS 自定义属性、`@media`、`env(safe-area-inset-*)`、`100dvh` | `lib/client.js` `ensureStyles()` | **降级**：注入失败或被 CSP 拦下时，弹窗仍用内联 fallback 尺寸与基础按钮样式（功能不受影响，只是没有悬停/焦点/自适应装饰） |
 | 14 | 会话列表客户端服务（dsh-api-session-controller，**可选**） | `ctx.get('sessions').list` 的 `getSnapshot()` / `subscribe(fn)`；读 `byId[sessionId].cwd`，只用于推荐"同级目录" | `lib/client.js` `QuickAdd` / `sessionCwdOf` | **降级**：服务缺席或字段改名时不出现"同级目录"推荐，其余功能照常 |
 | 15 | 工作区列表客户端服务（dsh-api-workspace-controller，**可选**） | `ctx.get('workspaces').list`；读 `items[].{ path, title, updatedAt }`，用于"推荐"和选择器"常用位置" | `lib/client.js` `QuickAdd` / `placesOf` | **降级**：服务缺席时"已有工作区"推荐与相应快捷位置不出现 |
-| 16 | 浏览器本地存储 | `localStorage`：`dsh-extra-workspaces:history-v1`（最近使用，最多 20 条）、`dsh-extra-workspaces:last-browse-dir`（选择器上次目录） | `lib/client.js` `readHistory` / `writeHistory` / `readLastDir` | **降级**：存储被禁或写满时历史与"上次目录"失效，清单与提醒不受影响 |
+| 16 | 浏览器本地存储 | `localStorage`：`dsh-extra-workspaces:history-v1`（最近使用，最多 20 条）、`dsh-extra-workspaces:last-browse-dir`（选择器上次**确认**的目录，只由"选择当前目录"写入） | `lib/client.js` `readHistory` / `writeHistory` / `readLastDir` | **降级**：存储被禁或写满时历史与"上次目录"失效，清单与提醒不受影响 |
 
 ## 二、依赖的相邻插件
 
@@ -57,18 +57,18 @@
 
 ## 四、升级 DSH 后要跑的核对清单
 
-1. `node --test "tests/**/*.spec.mjs"`（当前 52 例）——纯函数、注册形状、网页选择器回退、快速添加快捷项（历史/推荐/同级目录过滤）、选择器"常用位置"与重复/上限提示、置顶层渲染、固定表单位置与响应式注入。
+1. `node --test "tests/**/*.spec.mjs"`（当前 67 例）——纯函数、注册形状、包清单/挂载契约、网页选择器回退、快速添加快捷项（历史/推荐/同级目录过滤）、选择器"常用位置"与重复/上限提示、置顶层渲染、固定表单位置与响应式注入。
 2. 活体确认注册真的被收下（需要 DSH 在跑）：
    ```powershell
    (Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3080/session-settings/api/registrations.list' -Body '{}' -ContentType 'application/json').value.registrations | ConvertTo-Json -Depth 6
    ```
-   期望看到 `pluginId: dsh-extra-workspaces`、`items[0].key: workspaces`、`type: stringList`。
+   期望看到 `pluginId: dsh-extra-workspaces`、`items[0].key: workspaces`、`type: stringList`，以及 `items[0].max` = 本插件配置的生效上限（默认 8；浏览器半边的添加上限就读这个字段）。
 3. 在界面里添加一个工作区，确认下一轮对话里出现提醒（应有条目、作用域说明、以及与本会话权限档一致的措辞）。再从 **快速添加** 点一个推荐项：应立即出现在清单里、计数 +1、在下一轮上下文里同样出现；把它移除后，它应出现在"最近使用"里，点一下能加回来，点它右侧的 × 只删历史、不写清单。
 4. 若界面出现"没有可用的查看方式"，先 **Ctrl+Shift+R** 硬刷新——客户端模块换了版本号后，普通刷新可能还拿着旧清单。
-5. 对照第 1 节逐行检查：`sessionSettings` 的方法签名、`systemPrompt.context` 的 `order`/`text` 契约、`session.header.cwd`、`sandboxPolicy.resolve().mode`、`uiWorkspace` 的三个方法与错误码、`dsh.client` 四个字段。
+5. 对照第 1 节逐行检查：`sessionSettings` 的方法签名与 `SerializedItem.max` 透传、`systemPrompt.context` 的 `order`/`text`/`interpolate` 契约、`session.header.cwd`、`sandboxPolicy.resolve()` 的 `mode`/`workspaceRoot`、`uiWorkspace` 的三个方法与错误码、`dsh.client` 四个字段。
 6. **带 `--trusted-host` 的部署专项核对**：点"添加工作区"应打开内置网页选择器（而不是"现在打不开目录选择器"的红色提示）；**弹窗应盖在会话设置卡片之上，底部按钮与卡片右下角的拖拽调高亮区都能正常点击**（弹窗经 `document.body` 的 react-dom portal 渲染并占用顶层 z-index）；路径栏旁应出现宿主真实盘符（C:、D:…，当前盘高亮），点一下能跳转；文件列表首行 `../` 可回上一级（根目录不显示）；"编辑路径"可直接输入 `D:\...`；关掉再开对话框应回到上次确认的目录。**"新建文件夹"的输入条出现在底栏上方固定区，长列表滚动时应仍可见且自动聚焦**；切换目录后列表回到顶部；Esc 关闭弹窗。底部"文件夹过多，仅显示开头部分。"固定在底栏上方状态条，只在单层超过 1000 个目录时出现。
-8. **响应式专项**：把窗口缩到 640px 以内（或直接用手机/平板访问）时，弹窗应铺满视口（手机上去掉圆角）、行高与按钮变大、输入框 16px（防 iOS 聚焦缩放）、底栏按钮换行、底部留出 `safe-area` 安全区；点"新建文件夹"表单仍在底栏上方可见。
-7. 若界面仍是旧行为：**Ctrl+Shift+R** 硬刷新；插件客户端模块按版本号缓存，版本已升到 0.4.1。选择器内应能看到"常用位置"一行、文件夹前的图标；把选择器切到已在清单里的目录时，"选择当前目录"应置灰并说明原因。
+7. **响应式专项**：把窗口缩到 640px 以内（或直接用手机/平板访问）时，弹窗应铺满视口（手机上去掉圆角）、行高与按钮变大、输入框 16px（防 iOS 聚焦缩放）、底栏按钮换行、底部留出 `safe-area` 安全区；点"新建文件夹"表单仍在底栏上方可见。
+8. 若界面仍是旧行为：**Ctrl+Shift+R** 硬刷新；插件客户端模块按版本号缓存，版本已升到 0.4.2。选择器内应能看到"常用位置"一行、文件夹前的图标；把选择器切到已在清单里的目录时，"选择当前目录"应置灰并说明原因。
 
 ## 五、已知脆弱点（升级时优先看）
 
@@ -81,3 +81,6 @@
 6. **两个客户端服务名与字段名**：`sessions`、`workspaces` 是可选的服务键；会话列表里用 `byId[id].cwd`，工作区列表里用 `items[].{ path, title, updatedAt }`。任一改名都只会让推荐少一块，不会报错或写坏数据；若要恢复该推荐，改 `lib/client.js` 的 `serviceList` / `sessionCwdOf` / `suggestionCandidates` 三处。
 7. **历史存储是浏览器本地事实**：`dsh-extra-workspaces:history-v1` 记录的是 JSON 数组（`{ path, alias, note, updatedAt, source }`）。读到坏 JSON、非数组、空路径都按"没有历史"处理；升级改动这个形状时，换键名（`-v1` → `-v2`）即可安全弃用旧数据。
 8. **提醒文本必须 `interpolate: false`**：别名、备注、路径都是用户输入，可能含 `{{...}}`。若让它们参与提示词变量插值，未知或不完整变量名会让整次组装抛错（`unknown prompt variable`），该轮请求直接失败。依赖 `PromptContext.interpolate`（0.2.1-rc.2 已支持）；上游若删掉这个字段，文本会被重新插值。
+9. **渲染器 props 不属于冻结协议**：本控件用到 `pluginId/sessionId/item/registration/value/defaultValue/overridden/disabled/busy/domId/t/setValue/reset`，这些是按 dsh-session-settings 的实现（`lib/client.js` 的 `ItemRow`）对齐的；它的 protocol-v1 §4 只冻结 `registerRenderer/getResolved/subscribe` 三个成员，升级时要对照实现而不是只看协议。`item.max` 的透传（§一 #1）也依赖 `serializeRegistration` 对 `min/max/step/unit/placeholder` 的复制。
+10. **客户端 required inject 会级联放大**：浏览器半对 `sessionSettings` 的 required inject 一旦 pending（缺插件、版本不匹配、其 bootstrap 失败），DSH 的启动审计会让整张客户端表 `page.fail`，不是只有本控件消失。代码级止损方案（把 renderer 注册移进 `apply` 内的 `ctx.inject([...])` 组合 fiber）尚未实施——需要先确认 Cordis 组合 fiber 不参与 root entry 审计，否则不要动。
+11. **没有声明 `engines.dsh`**：插件实际依赖 0.2.1-rc.2 的契约（`interpolate`、browse 选择器、可写根语义），但 `package.json` 只有 cordis peer。若要发布到 registry，先确认 DSH 的 `evaluatePluginCompatibility` 对 prerelease 范围的匹配（例如 `>=0.2.1-rc.2` 不会自动接受 `0.2.2-rc.1` 这类 pre-release），再决定写什么范围。

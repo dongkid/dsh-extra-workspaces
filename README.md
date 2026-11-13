@@ -37,12 +37,25 @@
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `maxWorkspaces` | `8` | 每个会话最多几条（上限 64） |
+| `maxWorkspaces` | `8` | 每个会话最多几条（上限 64）。这个数字同时决定**面板能加几条**和**提醒最多列几条**（通过注册项的 `max` 传给浏览器半边） |
 | `reminderLanguage` | `'zh'` | 提醒文本语言（`'zh'` / `'en'`） |
+
+在 profile 的 patch 层给这一行覆盖配置，例如：
+
+```yaml
+- id: extra-workspaces
+  config:
+    maxWorkspaces: 12
+    reminderLanguage: 'zh'
+```
 
 ## 安装
 
-包放进 profile 能解析的位置（例如 `link:D:/projects/dsh-plugins/dsh-extra-workspaces`），把它加进 profile 的 `dsh.profile.bundles`，再按 `cordis.patch.yml` 里的那一行把宿主半边挂上。客户端半边由 `dsh.client` 声明自动装配，无需额外步骤。
+**硬前置：profile 里必须先有 `dsh-session-settings`**（本插件的设置项由它承载）。缺了它时不是"这一项不出现"：浏览器半边对 `sessionSettings` 是 required inject，客户端条目会停在 pending，DSH 的启动审计会让**整个 Web 客户端挂载失败**（同一个宿主里的所有客户端插件一起不可用）。
+
+1. 把 `dsh-session-settings` 加入 profile 的 `dsh.profile.bundles`（并确保它排在本插件前面）。
+2. 包放进 profile 能解析的位置（例如 `link:D:/projects/dsh-plugins/dsh-extra-workspaces`）。
+3. 把 `dsh-extra-workspaces` 加进 profile 的 `dsh.profile.bundles`。列进 bundles 就会自动应用包里的 `cordis.patch.yml`（宿主半边），`dsh.client` 声明会自动装配客户端半边，**不需要**再手写一行 patch。
 
 ## 依赖与升级对照
 
@@ -51,7 +64,7 @@
 ## 测试
 
 ```sh
-node --test "tests/**/*.spec.mjs"   # 当前 52 例
+node --test "tests/**/*.spec.mjs"   # 当前 67 例
 ```
 
 ## 已知边界
@@ -62,4 +75,6 @@ node --test "tests/**/*.spec.mjs"   # 当前 52 例
 - "推荐"里的已有工作区依赖 DSH Web 的 `sessions` / `workspaces` 客户端服务；没有它们的部署只保留"最近使用"和选择器里的目录浏览。同级目录每 5 分钟最多列一次父目录；选择器不可用时静默不推荐，不报错。
 - 不判断目录是否存在：提醒不断言，请求路径上也不探测磁盘（网络路径的探测会同步阻塞整个进程）。
 - 会话设置页仍会显示这一项自带的"默认值/已覆盖"框架，那由页面控制，不由本插件控制。
+- 浏览器半边对 `sessionSettings` 是 required inject（见"安装"）：profile 缺 `dsh-session-settings` 时整张客户端表启动失败，不是局部降级。
+- 提醒里的别名/备注会压成单行并分别截到 200/500 字符，路径里的控制字符会被替换成空格；面板输入框也按同样上限限制。
 - 提醒文本是给模型读的纯文本，按行拼接。**若某个查看器把它当 Markdown 渲染**，Windows 路径里的反斜杠会被 Markdown 当成转义符吃掉（例如 `C:\Users\me\.dsh` 会显示成 `C:\Users\me.dsh`）；模型收到的原文仍是正确路径，这只是显示层的问题。列表和后面的说明段之间用空行分隔，因此在那类查看器里说明段不会再被并进最后一条。
