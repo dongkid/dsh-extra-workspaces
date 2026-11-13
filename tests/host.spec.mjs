@@ -152,6 +152,31 @@ test('keeps the plain wording when no entry contains the session workspace', () 
   assert.match(text, /当前工作目录解析/)
 })
 
+test('separates the directory list from the sentences that follow it', () => {
+  // Markdown: a non-indented line directly under a list item is a lazy
+  // continuation of that item, so the scope sentence would render inside the
+  // last directory's bullet unless a blank line ends the list block.
+  const values = { 's-1': { [ITEM_KEY]: [backendEntry] } }
+  const outside = { id: 's-1', header: { cwd: 'D:\\work\\docs' } }
+  const inside = { id: 's-1', header: { cwd: 'D:\\work\\backend\\src' } }
+  const texts = [
+    textFor({ values, session: outside, sandboxPolicy: policyFor('danger-full-access') }),
+    textFor({ values, session: inside, sandboxPolicy: policyFor('danger-full-access') }),
+    reminderText({ entries: [backendEntry], mode: 'danger-full-access', lang: 'en', cwd: 'D:\\work\\docs' }),
+    reminderText({ entries: [backendEntry], mode: 'danger-full-access', lang: 'en', cwd: 'D:\\work\\backend\\src' }),
+  ]
+  for (const text of texts) {
+    const lines = text.split('\n')
+    let lastItem = -1
+    for (const [index, line] of lines.entries()) if (line.startsWith('- ')) lastItem = index
+    assert.ok(lastItem >= 0, text)
+    assert.equal(lines[lastItem + 1], '', text)
+    const paragraph = lines[lastItem + 2]
+    assert.equal(typeof paragraph, 'string', text)
+    assert.notEqual(paragraph.trim(), '', text)
+  }
+})
+
 test('drops duplicates, overlaps and junk, and defaults the alias', () => {
   const entries = normalizeEntries([
     { path: 'D:\\work\\backend', alias: '', note: '' },
