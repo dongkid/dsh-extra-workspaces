@@ -51,7 +51,7 @@
 ## 测试
 
 ```sh
-node --test "tests/**/*.spec.mjs"   # 当前 51 例
+node --test "tests/**/*.spec.mjs"   # 当前 52 例
 ```
 
 ## 已知边界

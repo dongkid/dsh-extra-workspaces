@@ -4,6 +4,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { apply, LOCALE, ITEM_KEY, PLUGIN_ID, CONTEXT_NAME, CONTEXT_ORDER, resolveConfig } from '../lib/index.js'
 import { normalizeEntries, reminderText, containsPath, isSamePath, defaultAlias } from '../lib/rules.js'
 
@@ -81,6 +82,18 @@ test('contributes the reminder at the declared position', () => {
   apply(built.ctx, undefined)
   assert.equal(built.contributions[0].name, CONTEXT_NAME)
   assert.equal(built.contributions[0].order, CONTEXT_ORDER)
+})
+
+test('ships every module the host half imports', () => {
+  // npm publishes only package.json "files": a helper omitted there still works
+  // from a linked checkout but is missing from the published tarball.
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const source = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+  const imported = [...source.matchAll(/from '\.\/([^']+)'/g)].map(match => match[1])
+  assert.ok(imported.includes('rules.js'))
+  for (const shipped of ['lib/index.js', 'lib/client.js', 'cordis.patch.yml', ...imported.map(name => 'lib/' + name)]) {
+    assert.ok(pkg.files.includes(shipped), shipped + ' is missing from package.json files')
+  }
 })
 
 test('says nothing when the session has no extra workspaces', () => {

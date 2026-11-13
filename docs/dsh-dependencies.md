@@ -57,7 +57,7 @@
 
 ## 四、升级 DSH 后要跑的核对清单
 
-1. `node --test "tests/**/*.spec.mjs"`（当前 51 例）——纯函数、注册形状、网页选择器回退、快速添加快捷项（历史/推荐/同级目录过滤）、选择器"常用位置"与重复/上限提示、置顶层渲染、固定表单位置与响应式注入。
+1. `node --test "tests/**/*.spec.mjs"`（当前 52 例）——纯函数、注册形状、网页选择器回退、快速添加快捷项（历史/推荐/同级目录过滤）、选择器"常用位置"与重复/上限提示、置顶层渲染、固定表单位置与响应式注入。
 2. 活体确认注册真的被收下（需要 DSH 在跑）：
    ```powershell
    (Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:3080/session-settings/api/registrations.list' -Body '{}' -ContentType 'application/json').value.registrations | ConvertTo-Json -Depth 6
