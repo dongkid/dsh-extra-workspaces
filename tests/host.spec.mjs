@@ -82,6 +82,8 @@ test('contributes the reminder at the declared position', () => {
   apply(built.ctx, undefined)
   assert.equal(built.contributions[0].name, CONTEXT_NAME)
   assert.equal(built.contributions[0].order, CONTEXT_ORDER)
+  // User notes may contain "{{...}}"; prompt-variable interpolation would throw.
+  assert.equal(built.contributions[0].interpolate, false)
 })
 
 test('ships every module the host half imports', () => {

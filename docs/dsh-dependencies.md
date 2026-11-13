@@ -13,7 +13,7 @@
 |---|---|---|---|---|
 | 1 | 会话设置基础设施（相邻插件 dsh-session-settings） | 宿主服务 `ctx.sessionSettings.register(registration)`、`ctx.sessionSettings.getItem(pluginId, itemKey, sessionId)`（同步返回） | `lib/index.js` apply / text 回调 | **硬失败**：服务缺席时插件不激活（`inject: ['sessionSettings']`），设置页不会出现本项 |
 | 2 | 同上，浏览器侧 | 客户端服务 `sessionSettings.registerRenderer(pluginId, itemKey, Component)` | `lib/client.js` apply | **降级**：注册失败只打日志，页面回落到内置控件（本插件依赖第 1 节"渲染器缺席保护"避免写坏数据） |
-| 3 | 运行时上下文（dsh-system-prompt） | `ctx.inject(['systemPrompt'], scope => scope.systemPrompt.context({ name, order, text }))`；`text` 是**每个 step 都会求值**的同步函数 | `lib/index.js` | **降级**：服务缺席时静默不贡献，设置项照常工作，模型不再被通知 |
+| 3 | 运行时上下文（dsh-system-prompt） | `ctx.inject(['systemPrompt'], scope => scope.systemPrompt.context({ name, order, text, interpolate: false }))`；`text` 是**每个 step 都会求值**的同步函数；`interpolate: false` 让用户备注里的 `{{...}}` 不被当作提示词变量 | `lib/index.js` | **降级**：服务缺席时静默不贡献，设置项照常工作，模型不再被通知 |
 | 4 | 上下文排序表 | `order` 用裸数字 **118**（介于官方 `SANDBOX_POLICY=110`、`APPROVAL_POLICY=115`、`SUBAGENT_DELEGATION=120` 之间；该表在 dsh-system-prompt 内，外部插件无法注册新名字） | `lib/index.js` `CONTEXT_ORDER` | **语义漂移**：数字仍合法不会报错，但与其他贡献的相对顺序可能变化 |
 | 5 | 会话对象 | `session.id`（取本会话的值）、`session.header.cwd`（判断某条目是否包含主工作区） | `lib/index.js` text 回调 | **硬失败/错话**：字段改名会让 text 抛错或措辞失真 |
 | 6 | 权限档（dsh-sandbox-policy，可选） | `ctx.get('sandboxPolicy').resolve({ session }).mode`，取值 `read-only` / `workspace-write` / `danger-full-access` | `lib/index.js` `permissionMode()` | **降级**：读不到时提醒里改用"取决于当前权限档"的中性措辞 |
@@ -80,3 +80,4 @@
 5. **值形状是约定而非校验**：`workspaces` 的值是对象数组，靠本插件两侧自行规范化（`lib/rules.js` 的 `normalizeEntries` 与 `lib/client.js` 的镜像规则）。
 6. **两个客户端服务名与字段名**：`sessions`、`workspaces` 是可选的服务键；会话列表里用 `byId[id].cwd`，工作区列表里用 `items[].{ path, title, updatedAt }`。任一改名都只会让推荐少一块，不会报错或写坏数据；若要恢复该推荐，改 `lib/client.js` 的 `serviceList` / `sessionCwdOf` / `suggestionCandidates` 三处。
 7. **历史存储是浏览器本地事实**：`dsh-extra-workspaces:history-v1` 记录的是 JSON 数组（`{ path, alias, note, updatedAt, source }`）。读到坏 JSON、非数组、空路径都按"没有历史"处理；升级改动这个形状时，换键名（`-v1` → `-v2`）即可安全弃用旧数据。
+8. **提醒文本必须 `interpolate: false`**：别名、备注、路径都是用户输入，可能含 `{{...}}`。若让它们参与提示词变量插值，未知或不完整变量名会让整次组装抛错（`unknown prompt variable`），该轮请求直接失败。依赖 `PromptContext.interpolate`（0.2.1-rc.2 已支持）；上游若删掉这个字段，文本会被重新插值。
